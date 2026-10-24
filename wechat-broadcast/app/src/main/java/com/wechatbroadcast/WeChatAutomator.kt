@@ -36,13 +36,14 @@ class WeChatAutomator(private val service: AccessibilityService) {
 
     fun waitUntilWeChat(token: Int, timeoutMs: Long): Boolean {
         val end = System.currentTimeMillis() + timeoutMs
+        var seenAt = 0L
         while (System.currentTimeMillis() < end) {
             if (!SessionStore.awaitContinue(token)) return false
-            val root = service.rootInActiveWindow
-            if (root != null) {
-                val pkg = root.packageName?.toString()
-                root.recycle()
-                if (pkg == WeChatStatus.PACKAGE_NAME) return true
+            if (foregroundPackage() == WeChatStatus.PACKAGE_NAME) {
+                if (seenAt == 0L) seenAt = System.currentTimeMillis()
+                if (System.currentTimeMillis() - seenAt >= 800) return true
+            } else {
+                seenAt = 0L
             }
             if (!waitMs(token, 300)) return false
         }
@@ -144,29 +145,72 @@ class WeChatAutomator(private val service: AccessibilityService) {
     }
 
     private fun openContacts(token: Int): String? {
-        repeat(8) {
+        val deadline = System.currentTimeMillis() + 20_000
+        var weChatSeenAt = 0L
+        var backs = 0
+        while (System.currentTimeMillis() < deadline) {
             if (!SessionStore.awaitContinue(token)) return STOPPED
-            val root = service.rootInActiveWindow
-            if (root != null) {
-                try {
-                    if (isContactsPage(root)) return null
-                    if (containsExact(root, "登录") && containsExact(root, "注册")) {
-                        return "微信似乎停在登录页，请先登录后再试"
-                    }
-                    if (clickLabeled(root, "通讯录")) {
-                        if (!waitMs(token, 800)) return STOPPED
-                        return@repeat
-                    }
-                } catch (_: Exception) {
-                    Log.i(TAG, "进入通讯录时界面变化")
-                } finally {
-                    root.recycle()
-                }
+            val pkg = foregroundPackage()
+            if (pkg != WeChatStatus.PACKAGE_NAME) {
+                weChatSeenAt = 0L
+                SessionStore.updateStatus(token, "正在打开微信")
+                launchWeChat()
+                if (!waitMs(token, 400)) return STOPPED
+                continue
             }
-            service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
-            if (!waitMs(token, 450)) return STOPPED
+            if (weChatSeenAt == 0L) weChatSeenAt = System.currentTimeMillis()
+            if (withRoot { isContactsPage(it) } == true) return null
+            if (withRoot { containsExact(it, "登录") && containsExact(it, "注册") } == true) {
+                return "微信似乎停在登录页，请先登录后再试"
+            }
+            SessionStore.updateStatus(token, "正在点开通讯录")
+            if (withRoot { clickContactsTab(it) } == true) {
+                if (!waitMs(token, 900)) return STOPPED
+                continue
+            }
+            val onMainTabs = withRoot { node ->
+                containsExact(node, "微信") || containsExact(node, "发现") || containsExact(node, "通讯录")
+            } == true
+            val stableFor = System.currentTimeMillis() - weChatSeenAt
+            if (
+                !onMainTabs &&
+                stableFor >= 2_500 &&
+                WeChatNavigation.shouldPressBack(pkg, WeChatStatus.PACKAGE_NAME, backs, onMainTabs = false)
+            ) {
+                backs += 1
+                SessionStore.updateStatus(token, "正在从微信内页返回")
+                service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+            }
+            if (!waitMs(token, 500)) return STOPPED
         }
-        return "没有进入微信通讯录。请确认微信已登录并停在主界面。"
+        return "没有进入微信通讯录。请先把微信留在主界面，能看到底部「通讯录」后再试。"
+    }
+
+    private fun foregroundPackage(): String? {
+        val root = service.rootInActiveWindow ?: return null
+        return try {
+            root.packageName?.toString()
+        } finally {
+            root.recycle()
+        }
+    }
+
+    private fun clickContactsTab(root: AccessibilityNodeInfo): Boolean {
+        val screen = Rect()
+        root.getBoundsInScreen(screen)
+        val threshold = if (screen.height() > 0) {
+            screen.top + (screen.height() * 0.72f).toInt()
+        } else {
+            0
+        }
+        val clickedBottom = anyNode(root) { node ->
+            if (labelOf(node) != "通讯录") return@anyNode false
+            val bounds = Rect()
+            node.getBoundsInScreen(bounds)
+            bounds.top >= threshold && clickNode(node)
+        }
+        if (clickedBottom) return true
+        return clickLabeled(root, "通讯录")
     }
 
     private fun scrollToTop(token: Int): Boolean {
@@ -219,9 +263,15 @@ class WeChatAutomator(private val service: AccessibilityService) {
     }
 
     private fun backTowardContacts(token: Int) {
+        var backs = 0
         repeat(3) {
             if (withRoot { root -> isContactsPage(root) } == true) return
             if (!SessionStore.awaitContinue(token)) return
+            val pkg = foregroundPackage()
+            if (!WeChatNavigation.shouldPressBack(pkg, WeChatStatus.PACKAGE_NAME, backs, onMainTabs = false)) {
+                return
+            }
+            backs += 1
             service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
             if (!waitMs(token, 400)) return
         }
