@@ -72,8 +72,10 @@ class BroadcastAccessibilityService : AccessibilityService() {
             publishStopped(job.token, 0, 0, 0, emptyList())
             return
         }
-        automator.launchWeChat()
-        if (!automator.waitUntilWeChat(job.token, 15_000)) {
+        if (!automator.waitUntilWeChat(job.token, 4_000)) {
+            automator.launchWeChat()
+        }
+        if (!automator.waitUntilWeChat(job.token, 12_000)) {
             if (!stillCurrent(job.token)) {
                 publishStopped(job.token, 0, 0, 0, emptyList())
             } else {

@@ -26,7 +26,9 @@ class WeChatAutomator(private val service: AccessibilityService) {
 
     fun launchWeChat() {
         val intent = service.packageManager.getLaunchIntentForPackage(WeChatStatus.PACKAGE_NAME) ?: return
-        intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        intent.addFlags(
+            android.content.Intent.FLAG_ACTIVITY_NEW_TASK or android.content.Intent.FLAG_ACTIVITY_REORDER_TO_FRONT,
+        )
         try {
             service.startActivity(intent)
         } catch (error: Exception) {
@@ -145,45 +147,48 @@ class WeChatAutomator(private val service: AccessibilityService) {
     }
 
     private fun openContacts(token: Int): String? {
-        val deadline = System.currentTimeMillis() + 20_000
-        var weChatSeenAt = 0L
+        val deadline = System.currentTimeMillis() + 18_000
+        var lastRelaunch = 0L
+        var sawWeChat = false
+        var sample = emptyList<String>()
         var backs = 0
         while (System.currentTimeMillis() < deadline) {
             if (!SessionStore.awaitContinue(token)) return STOPPED
-            val pkg = foregroundPackage()
-            if (pkg != WeChatStatus.PACKAGE_NAME) {
-                weChatSeenAt = 0L
-                SessionStore.updateStatus(token, "正在打开微信")
-                launchWeChat()
-                if (!waitMs(token, 400)) return STOPPED
+            if (!isWeChatForeground()) {
+                val now = System.currentTimeMillis()
+                if (!sawWeChat || now - lastRelaunch > 8_000) {
+                    lastRelaunch = now
+                    SessionStore.updateStatus(token, "正在打开微信")
+                    launchWeChat()
+                }
+                if (!waitMs(token, 500)) return STOPPED
                 continue
             }
-            if (weChatSeenAt == 0L) weChatSeenAt = System.currentTimeMillis()
-            if (withRoot { isContactsPage(it) } == true) return null
-            if (withRoot { containsExact(it, "登录") && containsExact(it, "注册") } == true) {
+            sawWeChat = true
+            val labels = withRoot { collectLabels(it) }.orEmpty()
+            if (labels.isNotEmpty()) sample = WeChatScreen.chromeLabels(labels)
+            if (WeChatScreen.looksLikeContactsPage(labels)) return null
+            if (WeChatScreen.looksLikeLogin(labels)) {
                 return "微信似乎停在登录页，请先登录后再试"
             }
-            SessionStore.updateStatus(token, "正在点开通讯录")
-            if (withRoot { clickContactsTab(it) } == true) {
-                if (!waitMs(token, 900)) return STOPPED
-                continue
-            }
-            val onMainTabs = withRoot { node ->
-                containsExact(node, "微信") || containsExact(node, "发现") || containsExact(node, "通讯录")
-            } == true
-            val stableFor = System.currentTimeMillis() - weChatSeenAt
-            if (
-                !onMainTabs &&
-                stableFor >= 2_500 &&
-                WeChatNavigation.shouldPressBack(pkg, WeChatStatus.PACKAGE_NAME, backs, onMainTabs = false)
-            ) {
+            if (WeChatScreen.looksLikeSubpage(labels) && backs < WeChatNavigation.MAX_BACKS_INSIDE_WECHAT) {
                 backs += 1
                 SessionStore.updateStatus(token, "正在从微信内页返回")
                 service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+                if (!waitMs(token, 700)) return STOPPED
+                continue
             }
-            if (!waitMs(token, 500)) return STOPPED
+            SessionStore.updateStatus(token, contactsStatus(sample))
+            val clickedText = withRoot { clickContactsTab(it) } == true
+            if (!clickedText) clickContactsTabByPosition()
+            if (!waitMs(token, 1000)) return STOPPED
         }
-        return "没有进入微信通讯录。请先把微信留在主界面，能看到底部「通讯录」后再试。"
+        return WeChatScreen.contactsEntryError(sample)
+    }
+
+    private fun contactsStatus(sample: List<String>): String {
+        if (sample.isEmpty()) return "正在点底部第二个标签（通讯录）"
+        return "正在进入通讯录，已看到${sample.joinToString("、")}"
     }
 
     private fun foregroundPackage(): String? {
@@ -195,22 +200,94 @@ class WeChatAutomator(private val service: AccessibilityService) {
         }
     }
 
+    private fun isWeChatForeground(): Boolean {
+        if (foregroundPackage() == WeChatStatus.PACKAGE_NAME) return true
+        val windows = service.windows ?: return false
+        var found = false
+        for (window in windows) {
+            val root = window.root ?: continue
+            if (!found && root.packageName?.toString() == WeChatStatus.PACKAGE_NAME) found = true
+            root.recycle()
+        }
+        return found
+    }
+
     private fun clickContactsTab(root: AccessibilityNodeInfo): Boolean {
         val screen = Rect()
         root.getBoundsInScreen(screen)
-        val threshold = if (screen.height() > 0) {
-            screen.top + (screen.height() * 0.72f).toInt()
-        } else {
-            0
-        }
+        val threshold = if (screen.height() > 0) screen.top + (screen.height() * 0.72f).toInt() else 0
         val clickedBottom = anyNode(root) { node ->
-            if (labelOf(node) != "通讯录") return@anyNode false
+            if (!WeChatScreen.matchesLabel(labelOf(node), "通讯录")) return@anyNode false
             val bounds = Rect()
             node.getBoundsInScreen(bounds)
             bounds.top >= threshold && clickNode(node)
         }
         if (clickedBottom) return true
-        return clickLabeled(root, "通讯录")
+        return anyNode(root) { node ->
+            WeChatScreen.matchesLabel(labelOf(node), "通讯录") && clickNode(node)
+        }
+    }
+
+    private fun clickContactsTabByPosition(): Boolean {
+        val root = weChatRoot()
+        val bounds = Rect()
+        if (root != null) {
+            root.getBoundsInScreen(bounds)
+            root.recycle()
+        }
+        if (bounds.width() <= 0 || bounds.height() <= 0) {
+            val metrics = service.resources.displayMetrics
+            bounds.set(0, 0, metrics.widthPixels, metrics.heightPixels)
+        }
+        val (x, y) = WeChatScreen.contactsTabPoint(bounds.left, bounds.top, bounds.width(), bounds.height())
+        return clickPoint(x, y)
+    }
+
+    private fun weChatRoot(): AccessibilityNodeInfo? {
+        val active = service.rootInActiveWindow
+        if (active != null && active.packageName?.toString() == WeChatStatus.PACKAGE_NAME) return active
+        active?.recycle()
+        val windows = service.windows ?: return null
+        var found: AccessibilityNodeInfo? = null
+        var bestArea = 0
+        for (window in windows) {
+            val root = window.root ?: continue
+            if (root.packageName?.toString() != WeChatStatus.PACKAGE_NAME) {
+                root.recycle()
+                continue
+            }
+            val rect = Rect()
+            root.getBoundsInScreen(rect)
+            val area = rect.width() * rect.height()
+            if (area > bestArea) {
+                found?.recycle()
+                found = root
+                bestArea = area
+            } else {
+                root.recycle()
+            }
+        }
+        return found
+    }
+
+    private fun collectLabels(root: AccessibilityNodeInfo): List<String> {
+        val labels = ArrayList<String>()
+        fun walk(node: AccessibilityNodeInfo) {
+            val text = node.text?.toString()?.trim().orEmpty()
+            val desc = node.contentDescription?.toString()?.trim().orEmpty()
+            if (text.isNotEmpty()) labels.add(text)
+            if (desc.isNotEmpty() && desc != text) labels.add(desc)
+            for (index in 0 until node.childCount) {
+                val child = node.getChild(index) ?: continue
+                try {
+                    walk(child)
+                } finally {
+                    child.recycle()
+                }
+            }
+        }
+        walk(root)
+        return labels
     }
 
     private fun scrollToTop(token: Int): Boolean {
@@ -231,8 +308,7 @@ class WeChatAutomator(private val service: AccessibilityService) {
     }
 
     private fun isContactsPage(root: AccessibilityNodeInfo): Boolean {
-        return containsExact(root, "新的朋友") &&
-            (containsExact(root, "群聊") || containsExact(root, "标签") || containsExact(root, "公众号"))
+        return WeChatScreen.looksLikeContactsPage(collectLabels(root))
     }
 
     private fun clickRetry(token: Int, label: String): Boolean {
@@ -263,15 +339,12 @@ class WeChatAutomator(private val service: AccessibilityService) {
     }
 
     private fun backTowardContacts(token: Int) {
-        var backs = 0
-        repeat(3) {
-            if (withRoot { root -> isContactsPage(root) } == true) return
+        repeat(WeChatNavigation.MAX_BACKS_INSIDE_WECHAT) {
             if (!SessionStore.awaitContinue(token)) return
-            val pkg = foregroundPackage()
-            if (!WeChatNavigation.shouldPressBack(pkg, WeChatStatus.PACKAGE_NAME, backs, onMainTabs = false)) {
-                return
-            }
-            backs += 1
+            val labels = withRoot { collectLabels(it) }.orEmpty()
+            if (WeChatScreen.looksLikeContactsPage(labels)) return
+            if (!WeChatScreen.looksLikeSubpage(labels)) return
+            if (!isWeChatForeground()) return
             service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
             if (!waitMs(token, 400)) return
         }
@@ -409,6 +482,15 @@ class WeChatAutomator(private val service: AccessibilityService) {
         node.getBoundsInScreen(rect)
         if (rect.width() <= 0 || rect.height() <= 0) return false
         val path = Path().apply { moveTo(rect.centerX().toFloat(), rect.centerY().toFloat()) }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, 80))
+            .build()
+        return dispatch(gesture)
+    }
+
+    private fun clickPoint(x: Float, y: Float): Boolean {
+        if (x <= 0f || y <= 0f) return false
+        val path = Path().apply { moveTo(x, y) }
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0, 80))
             .build()
