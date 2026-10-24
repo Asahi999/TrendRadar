@@ -40,9 +40,35 @@ class WeChatScreenTest {
     }
 
     @Test
-    fun contactsTabIsTheSecondBottomSlot() {
-        val (x, y) = WeChatScreen.contactsTabPoint(left = 0, top = 0, width = 1080, height = 2400)
-        assertEquals(405f, x)
-        assertEquals(2220f, y)
+    fun bottomBandExcludesChatRowsAboveTheTabBar() {
+        val density = 3f
+        val screenBottom = 2400
+        assertTrue(WeChatScreen.isInBottomTabBand(centerY = 2400 - (60 * 3), screenBottom, density))
+        assertFalse(WeChatScreen.isInBottomTabBand(centerY = 2400 - (140 * 3), screenBottom, density))
+    }
+
+    @Test
+    fun doesNotTapASingleButtonOrAWideChatRow() {
+        val ad = listOf(WeChatScreen.TabSpot("广告", centerX = 540, centerY = 2200))
+        assertEquals(null, WeChatScreen.chooseContactsTap(ad, minColumnGap = 120))
+        val labeled = listOf(WeChatScreen.TabSpot("通讯录", centerX = 270, centerY = 2300))
+        assertEquals(270 to 2300, WeChatScreen.chooseContactsTap(labeled, minColumnGap = 120))
+    }
+
+    @Test
+    fun tapsSecondOfFourBottomTabsWhenLabelsAreMissing() {
+        val spots = listOf(
+            WeChatScreen.TabSpot("", 135, 2300),
+            WeChatScreen.TabSpot("", 405, 2300),
+            WeChatScreen.TabSpot("", 675, 2300),
+            WeChatScreen.TabSpot("", 945, 2300),
+        )
+        assertEquals(405 to 2300, WeChatScreen.chooseContactsTap(spots, minColumnGap = 120))
+    }
+
+    @Test
+    fun wideRowIsNotATab() {
+        assertFalse(WeChatScreen.isTabSized(width = 1000, height = 180, screenWidth = 1080, density = 3f))
+        assertTrue(WeChatScreen.isTabSized(width = 200, height = 140, screenWidth = 1080, density = 3f))
     }
 }

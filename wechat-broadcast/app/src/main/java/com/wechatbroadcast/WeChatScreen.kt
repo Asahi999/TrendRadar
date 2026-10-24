@@ -41,8 +41,61 @@ object WeChatScreen {
 
     fun looksLikeSubpage(labels: List<String>): Boolean {
         val hasBack = labels.any { matchesLabel(it, "返回") }
-        val onMainTabs = labels.any { matchesLabel(it, "通讯录") } || labels.any { matchesLabel(it, "发现") }
-        return hasBack && !onMainTabs
+        return hasBack && !onMainTabs(labels)
+    }
+
+    fun looksLikeChat(labels: List<String>): Boolean {
+        val hasSend = labels.any { matchesLabel(it, "发送") }
+        return hasSend && !onMainTabs(labels)
+    }
+
+    private fun onMainTabs(labels: List<String>): Boolean {
+        return labels.any { matchesLabel(it, "通讯录") } || labels.any { matchesLabel(it, "发现") }
+    }
+
+    /** 只认贴着屏幕底边的标签栏，不认它上面的聊天列表。 */
+    fun isInBottomTabBand(centerY: Int, screenBottom: Int, density: Float): Boolean {
+        if (density <= 0f) return false
+        val fromBottom = screenBottom - centerY
+        val min = (12f * density).toInt()
+        val max = (96f * density).toInt()
+        return fromBottom in min..max
+    }
+
+    fun isTabSized(width: Int, height: Int, screenWidth: Int, density: Float): Boolean {
+        if (density <= 0f || screenWidth <= 0) return false
+        val min = (16f * density).toInt()
+        val maxHeight = (88f * density).toInt()
+        val maxWidth = (screenWidth * 0.34f).toInt()
+        return width in min..maxWidth && height in min..maxHeight
+    }
+
+    data class TabSpot(val label: String, val centerX: Int, val centerY: Int)
+
+    /**
+     * 有「通讯录」字样就点那个字。否则只有底部正好排出 3 到 5 个标签时，才点左起第二个。
+     * 单独一个按钮（广告、一条群聊）不会点。
+     */
+    fun chooseContactsTap(spots: List<TabSpot>, minColumnGap: Int): Pair<Int, Int>? {
+        spots.firstOrNull { matchesLabel(it.label, "通讯录") }?.let { return it.centerX to it.centerY }
+        if (minColumnGap <= 0) return null
+        val columns = distinctColumns(spots.map { it.centerX }, minColumnGap)
+        if (columns.size !in 3..5) return null
+        val targetX = columns[1]
+        val near = spots.filter { kotlin.math.abs(it.centerX - targetX) < minColumnGap }
+        if (near.isEmpty()) return null
+        return targetX to near.sumOf { it.centerY } / near.size
+    }
+
+    fun distinctColumns(xs: List<Int>, minGap: Int): List<Int> {
+        val sorted = xs.filter { it > 0 }.sorted()
+        if (sorted.isEmpty() || minGap <= 0) return emptyList()
+        val columns = ArrayList<Int>()
+        columns.add(sorted.first())
+        for (x in sorted.drop(1)) {
+            if (x - columns.last() >= minGap) columns.add(x)
+        }
+        return columns
     }
 
     fun chromeLabels(labels: List<String>): List<String> {
@@ -50,16 +103,10 @@ object WeChatScreen {
     }
 
     fun contactsEntryError(seenChrome: List<String>): String {
+        val prefix = "没有点进通讯录。为避免点进群聊或广告，已停止点击。"
         if (seenChrome.isEmpty()) {
-            return "没有进入微信通讯录，屏幕上的文字也没读到。请到系统无障碍里重新打开「微信群发」，并确认它可以读取屏幕内容。"
+            return prefix + "屏幕最底部没有读到「通讯录」标签。"
         }
-        return "没有进入微信通讯录。当前能读到：${seenChrome.joinToString("、")}。请把微信停在主界面后再点开始。"
-    }
-
-    /** 底部四个标签从左到右是微信、通讯录、发现、我。返回通讯录那一格的点击位置。 */
-    fun contactsTabPoint(left: Int, top: Int, width: Int, height: Int): Pair<Float, Float> {
-        val x = left + width * 0.375f
-        val y = top + height * 0.925f
-        return x to y
+        return prefix + "能读到：${seenChrome.joinToString("、")}。"
     }
 }
