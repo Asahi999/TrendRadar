@@ -33,7 +33,13 @@ cd wechat-broadcast
 ./gradlew testDebugUnitTest assembleDebug
 ```
 
-debug APK：
+可以直接下载的 debug APK 在仓库里：
+
+```text
+wechat-broadcast/wechat-broadcast.apk
+```
+
+自己编译时，Gradle 还会生成：
 
 ```text
 wechat-broadcast/app/build/outputs/apk/debug/app-debug.apk
@@ -43,10 +49,10 @@ wechat-broadcast/app/build/outputs/apk/debug/app-debug.apk
 
 ## 安装
 
-把 APK 拷到手机后安装。用数据线时：
+在本页打开 `wechat-broadcast/wechat-broadcast.apk` 下载到手机后安装。用数据线时：
 
 ```bash
-adb install -r wechat-broadcast/app/build/outputs/apk/debug/app-debug.apk
+adb install -r wechat-broadcast/wechat-broadcast.apk
 ```
 
 如果系统拦截侧载应用的无障碍权限：
